@@ -1,5 +1,8 @@
 
 
+[[https://zenodo.org/badge/latestdoi/204036590][https://zenodo.org/badge/204036590.svg?style=svg]]
+
+
 ** Generic scripts used in data analysis
 
 https://github.com/thackl/sam-scripts
