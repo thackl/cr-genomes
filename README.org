@@ -1,6 +1,6 @@
 
 
-** Generic scripts
+** Generic scripts used in data analysis
 
 https://github.com/thackl/sam-scripts
 - bam-coverage
@@ -11,13 +11,13 @@ https://github.com/thackl/seq-scripts
 - seq-circ-trim
 - seq-comp
 
-** Kmer-based Genome size estimation
+** Kmer-based genome size estimation for strain E4-10P
 
-file:genome-size-estimation/genome-size-estimation.R
+[[file:genome-size-estimation/genome-size-estimation.R]]
 
 [[file:genome-size-estimation/CrE410P-kmer-spectrum.png]]
 
-** /C. roenbergensis/ Draft assemblies
+** /C. roenbergensis/ draft assemblies
 
 Assemblies have been processed with redundans, but still contain bacterial
 contaminations and potential misassemblies, and are unpolished.
