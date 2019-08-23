@@ -1,0 +1,47 @@
+
+
+** Generic scripts
+
+https://github.com/thackl/sam-scripts
+- bam-coverage
+- bam-junctions  
+
+https://github.com/thackl/seq-scripts
+- seq-circ-restart
+- seq-circ-trim
+- seq-comp
+
+** Kmer-based Genome size estimation
+
+file:genome-size-estimation/genome-size-estimation.R
+
+[[file:genome-size-estimation/CrE410P-kmer-spectrum.png]]
+
+** /C. roenbergensis/ Draft assemblies
+
+Assemblies have been processed with redundans, but still contain bacterial
+contaminations and potential misassemblies, and are unpolished.
+
+| file               | assembler    | primary_data         | num_seqs |  sum_len | min_len | max_len |    N50 |
+|--------------------+--------------+----------------------+----------+----------+---------+---------+--------|
+| CrBV-c0b.fa        | Canu 1.8     | pacbio               |      343 | 39107625 |    5118 | 1533637 | 429009 |
+| CrBV-c1b.fa        | Canu 1.8     | pacbio               |      394 | 40117058 |    5308 |  975077 | 270687 |
+| CrBV-f1b.fa        | Flye 2.3.7   | pacbio               |      213 | 37884398 |    5129 | 1475468 | 479063 |
+| CrBV-w5b.fa        | Wtdbg 2.1    | pacbio               |      268 | 38356196 |    5098 | 1458748 | 435830 |
+| CrCf-c0b.fa        | Canu 1.8     | pacbio               |      272 | 34561700 |    5589 | 1022239 | 229877 |
+| CrCf-c1b.fa        | Canu 1.8     | pacbio               |      311 | 36551481 |    5490 | 1011470 | 270089 |
+| CrCf-f1b.fa        | Flye 2.3.7   | pacbio               |      216 | 34137805 |    5245 |  946461 | 276367 |
+| CrCf-w5b.fa        | Wtdbg 2.1    | pacbio               |      187 | 33253511 |    5670 |  938012 | 321504 |
+| CrEa-c0b.fa        | Canu 1.8     | pacbio               |      265 | 35731872 |    5057 | 1514847 | 402275 |
+| CrEa-c1b.fa        | Canu 1.8     | pacbio               |      293 | 36283366 |    5128 | 1087465 | 282182 |
+| CrEa-f1b.fa        | Flye 2.3.7   | pacbio               |      190 | 34509388 |    5337 | 1335512 | 348875 |
+| CrEa-gen-dp-4.5.fa | SPAdes 3.6.1 | miseq + corr. pacbio |      315 | 29710364 |    1002 |  910477 | 228292 |
+| CrEa-w5b.fa        | Wtdbg 2.1    | pacbio               |      376 | 36791972 |    5002 | 1475054 | 432668 |
+| CrEa-w6b.fa        | Wtdbg 2.1    | pacbio               |      371 | 36429848 |    5057 |  947144 | 405606 |
+| CrEa-w7b.fa        | Wtdbg 2.1    | pacbio               |      333 | 36790428 |    5080 | 1467234 | 546423 |
+| CrEa-w8b.fa        | Wtdbg 2.1    | pacbio               |      385 | 36725772 |    5002 | 1259187 | 383112 |
+| CrRC-c0b.fa        | Canu 1.8     | pacbio               |      513 | 30455408 |    5151 |  563941 |  99385 |
+| CrRC-c1b.fa        | Canu 1.8     | pacbio               |      392 | 34047446 |    6587 |  635481 | 155376 |
+| CrRC-f1b.fa        | Flye 2.3.7   | pacbio               |      396 | 33792790 |    5193 |  720955 | 131225 |
+| CrRC-w5b.fa        | Wtdbg 2.1    | pacbio               |      296 | 31845612 |    5053 |  701287 | 178453 |
+
