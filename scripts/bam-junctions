@@ -1,0 +1,427 @@
+#!/usr/bin/env perl
+# Created: 14 Nov 2018
+# Author: Thomas Hackl, thackl@lim4.de
+use warnings;
+use strict;
+use Getopt::Long  qw(:config no_ignore_case bundling);
+use Data::Dumper;
+use List::Util;
+use Data::Dumper;
+use FindBin qw($Script);
+use File::Basename;
+use File::Which;
+
+use Sam::Parser 0.11;
+use Sam::Alignment 0.10 ':flags';
+use Sam::Seq 0.16;
+use Fasta::Parser;
+use Fasta::Seq;
+use Fastq::Parser;
+use Fastq::Seq;
+
+GetOptions (
+    "min-aln-len|a=i" => \(my $min_aln_len = 100),
+    "min-ovh-len|b=i" => \(my $min_ovh_len = 100),
+    "min-jnc-cov|c=i" => \(my $min_jnc_cov = 10),
+    "max-ref-cov|d=i" => \(my $max_ref_cov = -1),
+    "end-margins|e=i" => \(my $end_margins = 5),
+    "fuzzy|f=i" => \(my $fuzzy = 0),
+    "overhang-file=s" => \(my $ovh_file),
+    "overhang-plus=i" => \(my $ovh_plus = 50),
+    "out|o=s" => sub { '-' ne $_[1] and open(STDOUT, '>', $_[1]) || die $! },
+    "help|h!" => \(my $help),
+    "debug|D!" => \(my $debug),
+) or die("Error in command line arguments\n");
+
+if ($help || !@ARGV || @ARGV > 2){
+    print "Usage: bam-junctions.pl bam [region] > out\n";
+    printf " %-19s  %s\n", "-a/--min-aln-len", "minimum length of aligned read part [$min_aln_len]";
+    printf " %-19s  %s\n", "-b/--min-ovh-len", "minimum length of read overhang (clip) [$min_ovh_len]";
+    printf " %-19s  %s\n", "-c/--min-jnc-cov", "minimum read support for junction [$min_jnc_cov]";
+    printf " %-19s  %s\n", "-d/--max-ref-cov", "ignore junctions with this many reads supporting the reference, -1 to disable [$max_ref_cov]";
+
+    printf " %-19s  %s\n", "-e/--end-margins", "ignore junctions this close to sequence/region ends [$end_margins]";
+    printf " %-19s  %s\n", "-f/--fuzzy", "collapse junctions this close to each other [$fuzzy]";
+
+    printf " %-19s  %s\n", "--overhang-file", "write overhangs to file [".($ovh_file // "OFF")."]";
+    printf " %-19s  %s\n", "--overhang-plus", "add this much aligned sequence to overhangs [$ovh_plus]";
+
+    printf " %-19s  %s\n", "-o/--out", "write junctions to this file [STDOUT]";
+    printf " %-19s  %s\n", "-h/--help", "show this help";
+    printf " %-19s  %s\n", "-D/--debug", "show debug messages";
+    exit 0;
+}
+
+my $bam_file = $ARGV[0];
+my $bam_region = $#ARGV ? $ARGV[1] : undef;
+
+my $samtools = "samtools";
+check_binary($samtools, ["--version", "1.1"]);
+
+if ($ovh_file) { die "Writing overhangs to file is currently not implemented" }
+
+##----------------------------------------------------------------------------##
+# make sure bam is indexed
+unless ( -e $bam_file.".bai" ) { qx(samtools index $bam_file.bai); }
+
+# init sam parser
+my $sam_cmd = "$samtools view -H $bam_file |";
+open(SAM, $sam_cmd) or die $!;
+my $sp = Sam::Parser->new(fh => \*SAM);
+
+# and read refernces by sequences/region
+my @refs;
+my %ref_lengths;
+my $from_to = "";
+my $rid;
+if ($bam_region) {
+    ($rid, $from_to) = split(":", $bam_region);
+    $from_to = defined($from_to) ? ":$from_to" : "";
+    while (my %h = $sp->next_header_line('@SQ')){
+        next unless $h{SN} eq $rid;
+        push @refs, $h{SN};
+        $ref_lengths{$h{SN}} = $h{LN};
+    }
+}else {
+    while (my %h = $sp->next_header_line('@SQ')){
+        push @refs, $h{SN};
+        $ref_lengths{$h{SN}} = $h{LN};
+    }
+    print STDERR "scanning ".@refs." sequences\n";
+}
+
+
+##----------------------------------------------------------------------------##
+# read BAM
+
+my $rn = @refs;
+my ($rc, $ac, $sc) = 0;
+my $rc5 = int(($rn/20)+.5) || 1;
+my $rc5c;
+my $rcl = length($rn);
+
+if ($ovh_file) { open(OVH, ">", $ovh_file) or die $!; }
+
+foreach my $rid (@refs){
+    $rc++;
+    print STDERR "processing $rc/$rn: $rid$from_to $ref_lengths{$rid} bp\n";
+
+    print STDERR " junctions\n";
+    print STDERR "  extracting ";
+    my ($apre, $asuf) = extract_clipped_alns($rid, $from_to);
+    my $aindel = extract_indel_alns($rid, $from_to);
+    printf STDERR "\r  %10s %9d pre %9d suf %9d indel\n", "extracted:",
+        keys(%$apre)+0, keys(%$asuf)+0, keys(%$aindel)+0;
+
+    if ($fuzzy){
+        print STDERR "  gathering ";
+        ($apre, $asuf, $aindel) = gather_nearby_alns($rid, $apre, $asuf, $aindel);
+        printf STDERR "\r  %10s %9d pre %9d suf %9d indel\n", "gathered:", keys(%$apre)+0, keys(%$asuf)+0, keys(%$aindel)+0;
+    }else{
+        print STDERR "  gathering ";
+        die '@_ for aindel';
+        ($apre, $asuf, $aindel) = apply_min_cov($rid, $apre, $asuf, $aindel);
+        printf STDERR "\r  %10s %9d pre %9d suf\n", "gathered:", keys(%$apre)+0, keys(%$asuf)+0;
+    }
+
+    print STDERR "  filtering ";
+    my $rcov;
+    ($apre, $asuf, $rcov) = filter_spanned_junctions($rid, $apre, $asuf);
+
+    # TODO: ref_cov for $aindel - not same as spanned junctions, indel reads by
+    # def. are present on both sides of feat. So alt_cov = total_cov - indel_cov
+    printf STDERR "\r  %10s %9d pre %9d suf\n", "filtered:", keys(%$apre)+0, keys(%$asuf)+0;
+
+    report_bed($rid, $apre, 'pre', $rcov);
+    report_bed($rid, $asuf, 'suf', $rcov);
+    report_bed($rid, $aindel, 'indel');
+
+}
+
+
+
+if ($ovh_file){ close OVH }
+
+#------------------------------------------------------------------------------#
+
+
+sub report_bed{
+    my ($rid, $ah, $label, $rcov) = @_;
+    foreach my $pos (sort by_window_start keys(%$ah)) {
+        my ($from, $to) = pos_from_to($pos);
+        my $cov = @{$ah->{$pos}}+0;
+        my $alt_cov = defined($rcov) ? $rcov->{$pos} : "NA";
+        print join("\t", $rid, $from-1, $to, $label."_".$pos."_".$cov, $cov, $alt_cov, "$rid:$from-$to"), "\n";
+    }
+}
+
+sub by_window_start{
+    (split("-",$a,2))[0] <=> (split("-", $b,2))[0]
+}
+
+sub pos_from_to{
+    my ($from, $to) = split("-", $_[0]);
+    $to//=$from;
+    return($from, $to);
+}
+
+
+# Gather alignments with clipped ends satisfying option cutoffs by position in a
+# prefix and a suffix hash
+# TODO: ignore margins
+# TODO: mismatch hotspots - mismatches from samtools calmd seq
+# TODO: larger indels could also be split alignments
+
+sub extract_indel_alns{
+    my ($rid, $from_to) = (@_, "");
+    my %aindel;
+
+    # filter unmapped or secondary
+    open(SAM, "$samtools view -F 260 $bam_file $rid$from_to |") or die $!;
+    my $sp = Sam::Parser->new(fh => \*SAM);
+    while(my  $aln = $sp->next_aln()){
+        $ac++;
+        print STDERR "." unless $ac % 1000;
+
+        # ignore non trimmed reads
+        next if $aln->length < $min_aln_len;
+        my $cigar = $aln->cigar;
+
+        my $min_indel_len = 5;
+        my $min_indel_score = 15;
+        # inserts/dels from cigar
+        my $score = 0;
+        my $cache = 0;
+        my $ref_pos = $aln->pos;
+        while ($cigar =~ /(\d+)([MDIX=])/g) {
+            #print "\t$1 $2 $ref_pos, $score, $cache\n";
+            if ($2 eq "I" || $2 eq "D"){
+                $ref_pos += $1 if $2 eq "D";
+                $score+=$1 if $1 >= $min_indel_len;
+                #print "$2 $1 $score $ref_pos ",$aln->qname,"\n" if $1 >= $min_indel_len;
+            }else {
+                $ref_pos += $1;
+                if ($cache + $1 < $fuzzy){
+
+                    $cache+=$1;
+                }else {
+                    $cache = 0;
+                    if ( $score > $min_indel_score) {
+                        #print STDERR "$score\t$ref_pos\n";
+                        push @{$aindel{$ref_pos}}, $aln;
+                    }elsif ($score) {
+                        #print "- $score $ref_pos\n";
+                    }
+                    $score = 0;
+                }
+            }
+        };
+    }
+    return \%aindel;
+}
+
+
+# Gather alignments with clipped ends satisfying option cutoffs by position in a
+# prefix and a suffix hash
+sub extract_clipped_alns{
+    my ($rid, $from_to) = (@_, "");
+    my %apre; my %asuf;
+
+    # filter unmapped or secondary
+    open(SAM, "$samtools view -F 260 $bam_file $rid$from_to |") or die $!;
+    my $sp = Sam::Parser->new(fh => \*SAM);
+    while(my  $aln = $sp->next_aln()){
+        $ac++;
+        print STDERR "." unless $ac % 1000;
+
+        # ignore non trimmed reads
+        my ($pre) = $aln->cigar =~ /^(\d+)[SH]/;
+        my ($suf) = $aln->cigar =~ /(\d+)[SH]$/;
+        next unless $pre || $suf;
+        next if $aln->length < $min_aln_len;
+        if ($end_margins && $pre && $aln->pos <= $end_margins){ $pre = undef};
+        if ($end_margins && $suf && $aln->pos + length($aln->seq_aligned) > $ref_lengths{$rid}-$end_margins +1){ $suf = undef};
+
+        push @{$apre{$aln->pos}}, $aln if $pre && $pre >= $min_ovh_len;
+        push @{$asuf{$aln->pos + length($aln->seq_aligned) -1 }}, $aln if $suf && $suf >= $min_ovh_len;
+    }
+    return(\%apre,\%asuf);
+}
+
+sub apply_min_cov{
+    my ($rid, $apre, $asuf) = @_;
+    for my $ah ($apre, $asuf) {
+        my @delete;
+        while (my ($k, $v) = each %$ah) {
+            push @delete, $k if @$v < $min_jnc_cov;
+        }
+        delete($ah->{$_}) for @delete;
+    }
+    return($apre, $asuf);
+}
+
+# Merge alns close to each other into "same" position
+sub gather_nearby_alns{
+    my $rid = shift; my $i_set=0;
+    for my $ah (@_) {
+        $i_set++;
+        # windowed filter for regions of interest
+        my @pos = sort{$a<=>$b}keys %$ah;
+        next unless @pos; # no clips
+        my @along = (0) x ($ref_lengths{$rid}+1); # pos is 1-off, perl is 0-off, ignore 0;
+        @along[@pos] = map{scalar @$_}@{$ah}{@pos};
+        my %above;
+        # run along ref pos and find windows above threshold
+        my $sum = sum(@along[1..$fuzzy-1]); # first win
+        $above{1} = $sum if $sum >= $min_jnc_cov;
+        for (my $i=2; $i<@along-$fuzzy; $i++) {
+            $sum = $sum-$along[$i-1]+$along[$i+$fuzzy];
+            if ($sum >= $min_jnc_cov){
+                $above{$i} = $sum;
+            }
+        }
+
+
+        # collapse adjacent windows
+        my @above = sort{$a<=>$b}keys %above;
+        next unless @above >1; # need at least two pos for collapse
+        my @wins;
+        my @win = ($above[0], $above[0]+$fuzzy); # collapsed win start,end
+        for (my $i=1;$i<@above;$i++) {
+            if ($above[$i] <= $win[1]) { # expand win
+                $win[1] = $above[$i]+$fuzzy;
+            }else {
+                push @wins, [@win]; # store old win
+                @win = ($above[$i],$above[$i]+$fuzzy) # start new win
+            }
+        }
+        push @wins, [@win]; # store old win
+
+        my %collapsed ;
+        foreach my $wins (@wins) {
+            my @pos = grep{exists $ah->{$_}}($wins->[0]..$wins->[1]);
+            my $win = join("-", range(@pos));
+            $collapsed{$win} = [];
+            push @{$collapsed{$win}}, @{$ah->{$_}} for @pos;
+        }
+        $ah = \%collapsed;
+    }
+    return(@_)
+}
+
+sub sum{
+    my $s = 0;
+    $s+= $_ for @_;
+    return $s;
+}
+
+sub min{
+    my $min = $_[0];
+    for (my $i=1;$i<@_;$i++) {
+        $min = $_[$i] if $_[$i] < $min;
+    }
+    return $min;
+}
+
+sub max{
+    my $max = $_[0];
+    for (my $i=1;$i<@_;$i++) {
+        $max = $_[$i] if $_[$i] > $max;
+    }
+    return $max;
+}
+
+sub range{
+    return(min(@_),max(@_));
+}
+
+# get reads spanning the junction
+sub filter_spanned_junctions{
+    my $rid = shift;
+    my %rcov;
+    for my $ah (@_) {
+        my %cov;
+
+        my @pos = keys %$ah;
+        foreach my $pos(@pos) {
+            my ($from, $to) = pos_from_to($pos);
+            $cov{$from} = {pos => $pos, to => $to, cov => 0};
+        }
+
+        my $region;
+        #$region=$rid.$from_to;
+        if (0 == @pos) {
+             next;
+        }elsif (@pos < 100) {
+            $region = join(" ", map{$rid.":".(join("-", pos_from_to($_)))}@pos);
+         }else{
+            $region=$rid.$from_to;
+        }
+
+        # filter unmapped or secondary
+        open(SAM, "$samtools view -F 260 $bam_file $region |") or die $!;
+        my $sp = Sam::Parser->new(fh => \*SAM);
+        my $ac=0;
+        while(my  $aln = $sp->next_aln()){
+            print STDERR "." unless ++$ac % 1000;
+            my ($s, $e) = ($aln->pos + 30, $aln->pos + length($aln->seq_aligned) - 30);
+            for ($s..$e){
+                if (exists($cov{$_}) && $cov{$_}{to} < $e){
+                    $cov{$_}{cov}++;
+                }
+            }
+        }
+
+        while (my ($k,$v) = each %cov) {
+            if($max_ref_cov > -1 && $v->{cov} > $max_ref_cov){
+                delete($ah->{$v->{pos}})
+            }else {
+                $rcov{$v->{pos}} = $v->{cov};
+            }
+        }
+    }
+    return(@_, \%rcov);
+}
+
+
+
+
+=head2 check_binary
+
+Check whether a required binary (and version) exists.
+
+=cut
+
+sub check_binary{
+    my($bin, $ver) = (@_);
+    my $fbin = $bin;
+    unless(-e $fbin && -x $fbin){
+        if ($fbin = which($bin)) {
+            die("Binary '$fbin' not executable") unless -e $fbin && -x $fbin;
+        } else {
+            die("Binary '$bin' neither in PATH nor executable");
+        }
+    }
+
+    $bin = basename($fbin);
+
+    my $v;
+    if ($ver) {
+        die("ARRAY ref required") unless ref $ver eq "ARRAY";
+
+        my $vs = qx($fbin $ver->[0]);
+        if ($? or ! $vs) {
+            die("Couldn't determine version of $bin, at least $ver->[1] required");
+        }
+
+        ($v) = $vs =~ /(\S+?)\D*$/m;
+
+        if (version->declare($v) < version->declare($ver->[1])) {
+            die("Version $v of '$bin' < $v");
+        }
+
+    }
+
+    printf STDERR "  [ok] %-15s %s\n", $bin.($v ? "-$v" : ""), dirname($fbin);
+
+}

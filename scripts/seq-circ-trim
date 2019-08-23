@@ -1,0 +1,202 @@
+#!/usr/bin/env perl
+# Created: 07 Mar 2019
+# Author: Thomas Hackl, thackl@lim4.de
+use warnings;
+use strict;
+use Getopt::Long  qw(:config no_ignore_case bundling);
+use Fasta::Parser;
+use FindBin;
+use File::Temp qw(tempfile);
+use List::Util qw(min max);
+use Data::Dumper;
+
+my $usage =
+"Usage: seq-circ-trim [options] sequences.fa
+
+Note: Expects minimap2 and blast+ in PATH";
+
+my $desc = " Assume sequences are circular, and overlaps between start and end
+of each sequence are assembly artefacts, and should be trimmed.";
+
+GetOptions (
+    "min-identity|i" => \(my $min_idy = .9),
+    "out|o=s" => sub { '-' ne $_[1] and open(STDOUT, '>', $_[1]) || die $! },
+    "help|h!" => \(my $help),
+    "debug|D!" => \(my $debug),
+) or die("Error in command line arguments\n");
+
+if ($help || @ARGV != 1){
+    print "$usage\n\n";
+    printf " %-19s  %s\n", "-o/--out", "write to this file [STDOUT]";
+    printf " %-19s  %s\n", "-h/--help", "show this help";
+    printf " %-19s  %s\n", "-D/--debug", "show debug messages";
+    print "$desc\n";
+    exit 0;
+}
+
+my $seq_file = $ARGV[0];
+unless (-f $seq_file) {
+    die "Can't read stdin, need assembly in regular plain file.\n";
+}
+
+my $ovh = get_large_overhangs($seq_file);
+print STDERR Dumper($ovh);
+my $fp = Fasta::Parser->new(file=> $seq_file);
+
+while (my $fs = $fp->next_seq()) {
+    if (exists($ovh->{$fs->id()})) {
+        $fs = $fs->substr_seq(0,$ovh->{$fs->id()}[0])
+    }
+    print $fs;
+}
+
+
+sub get_large_overhangs{
+    my ($seq_file) = @_;
+    my %ovh;
+
+    my $minimap2_cmd = "minimap2 -Xc $seq_file $seq_file";
+    print STDERR "running minimap2\n+ $minimap2_cmd\n";
+    open(MM, "-|", $minimap2_cmd);
+    while(<MM>){
+        chomp();
+        my ($qi,$ql,$qs,$qe,$st,$ti,$tl,$ts,$te,$am,$al,$aq,@rest) = split("\t", $_);
+        next unless(
+            $qi eq $ti && $st eq "+" &&
+                $am/$al >= $min_idy &&
+                $qs < 100 && $te +100 >= $te);
+        if (exists($ovh{$qi})) {
+            next unless $ovh{$qi}[1] < $tl; # onlt keep longest overlap
+        }
+        $ovh{$qi} = [$ts+0, $tl]
+    }
+    close(MM);
+    \%ovh;
+}
+
+
+
+
+__END__
+my ($best_hit,$asm_seq_n, $hit_n) = blast_best_hit($asm_file);
+
+if ($asm_status eq 'auto') {
+    if ($asm_seq_n >1) {
+        $asm_status = 'draft';
+        print STDERR "assembly status: $asm_status (auto w/ multiple contigs)\n";
+    }else{
+        $asm_status = 'closed';
+        print STDERR "assembly status: $asm_status (auto w/ a single contig)\n";
+    }
+}else {
+    print STDERR "assembly status: $asm_status\n";
+}
+
+if (!@$best_hit) {
+    print STDERR "No hits to start proteins found. Exiting.";
+    exit 0;
+}else {
+    print STDERR "Best hit (out of $hit_n possible hits):\n";
+    print STDERR join("\t", @$best_hit);
+}
+# qseqid qstart qend sseqid sstart send slen strand
+my ($query_id, $query_start, $query_end, $query_len,  $target_id, $target_start,
+    $target_end, $target_len) = @$best_hit;
+my $is_reverse = $query_start > $query_end;
+$query_end+=1 if $is_reverse;
+if ($is_reverse) {
+    $query_start+= min($target_start + $grace, $query_len-$query_start);
+}else {
+    $query_start-= min($query_start, $target_start + $grace);
+}
+print STDERR "$is_reverse $query_start\n";
+while(my $fs = $fp->next_seq){
+    if($fs->id eq $query_id){
+	my ($f1, $f2);
+        if(!$is_reverse){
+            print STDERR "splitting sequence ", $fs->id, "\n";
+	    $f1 = $fs->substr_seq($query_start);
+	    $f2 = $fs->substr_seq(0,$query_start);
+	}else{
+            print STDERR "splitting and reverse-complementing sequence ", $fs->id, "\n";
+            $f1 = $fs->substr_seq(0,$query_start)->reverse_complement;
+	    $f2 = $fs->substr_seq($query_start)->reverse_complement;
+	}
+        if ($asm_status eq 'closed') {
+            print STDERR "recircularizing ", $fs->id, "\n";
+            print $f1.$f2;
+        }else {
+            $f2->id(($f2->id)."b"),
+            print $f1,$f2;
+        }
+    }else {
+        print $fs;
+    }
+}
+
+# more than 5% non atugcnATUGCN
+sub guess_seq_type{
+    my ($fa_file) = @_;
+    my $fp = Fasta::Parser->new(file=>$fa_file);
+    my $seq = $fp->next_seq()->seq();
+    my $aa_n = $seq =~ tr/atgcnATGCN//c;
+    $aa_n/length($seq) > .05 ? "prot" : "nucl";
+}
+
+## get best candidate protein using blast
+sub blast_best_hit{
+    my ($query_file) = @_;
+    my $blast_bin = $start_seq_type eq "prot" ? "blastx" : "blastn";
+    my $outfmt = '"7 qseqid qstart qend qlen sseqid sstart send slen bitscore"';
+    my $blast_cmd = "$blast_bin -db $start_seq_file -query $query_file -outfmt $outfmt -max_target_seqs 5 -evalue 1e-5";
+    print STDERR "running blast\n+ $blast_cmd\n";
+    open(BLAST, "-|", $blast_cmd);
+    my $top_hit;
+    my $hit;
+    my $hit_n;
+    my $asm_seq_n;
+    my @best_hit;
+    while(<BLAST>){
+        if(/^# Query/){ $asm_seq_n++; $top_hit++ };
+        if(/^[^#]/ && $top_hit){
+            $top_hit = 0; # only top hit
+            my @hit = split("\t", $_);
+            $hit_n++;
+            if(!@best_hit){
+                @best_hit = @hit
+            }elsif ($best_hit[8] < $hit[8]) { # best score
+                @best_hit = @hit
+            }
+        }
+    }
+    close(BLAST);
+    return \@best_hit, $asm_seq_n, $hit_n;
+}
+
+## refine with exonerate - deprecated because slow
+# retrieve best hit seq from db to speed up exonerate
+# my ($tmp, $best_start_seq_file) = tempfile();
+# while(my $start_seq = $start_seq_db->next_seq){
+#     if ($start_seq->id() eq $best_hit[1]){ print $tmp $start_seq; }
+# }
+
+# ## --genetic-code 4 for Mycoplasmen
+# my $exonerate_mode = $start_seq_type eq "prot" ? "protein2dna" : "";
+# my $exonerate_cmd = "exonerate -n 1 -m $exonerate_mode --percent 80 --showalignment FALSE $best_start_seq_file $asm_file";
+# open(HIT, "-|", $exonerate_cmd);
+# while(<HIT>){
+#     if(/^vulgar/){$hit=$_; last;}
+# }
+# close(HIT);
+
+# if(!defined($hit)){
+#     die "Failed to realign protein with exonerate!\n";}
+# else{
+#     print STDERR "Exonerate-refined hit:\n$hit";
+# }
+
+# chomp($hit);
+
+# my ($vulgar, $query_id, $query_start, $query_end, $query_strand,
+#     $target_id, $target_start, $target_end, $target_strand,
+#     $score, $extra) = split(" ", $hit, 11);
