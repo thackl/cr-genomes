@@ -14,6 +14,9 @@ https://github.com/thackl/seq-scripts
 - seq-circ-trim
 - seq-comp
 
+https://github.com/thackl/phylo-scripts
+- tax-resolve
+
 ** Kmer-based genome size estimation for strain E4-10P
 
 [[file:genome-size-estimation/genome-size-estimation.R]]
