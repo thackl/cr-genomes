@@ -1,0 +1,190 @@
+#!/usr/bin/env python
+import argparse
+import sys
+import re
+import logging
+import warnings
+from ete3 import NCBITaxa
+
+__version__='1.7.1'
+
+## parse taxids
+# http://etetoolkit.org/docs/latest/tutorial/tutorial_ncbitaxonomy.html
+# http://biology.stackexchange.com/questions/45031/how-to-get-taxonomic-specific-ids-for-kingdom-phylum-class-order-family-gen
+ncbi = NCBITaxa() # read ncbi tax db
+
+def opts():
+    ncbi_ranks = ['species', 'genus', 'family', 'order', 'class', 'phylum', 'kingdom', 'superkingdom',
+        'subspecies', 'subgenus', 'tribe', 'subfamily', 'superfamily', 'parvorder', 'infraorder',
+        'suborder', 'superorder', 'parvclass', 'infraclass', 'subclass', 'superclass', 'subphylum']
+
+    ncbi_abbr = {
+        's': 'species',
+        'g': 'genus',
+        'f': 'family',
+        'o': 'order',
+        'c': 'class',
+        'p': 'phylum',
+        'k': 'kingdom',
+        'd': 'superkingdom', # superkingdom == domain
+    }
+
+    def ranks_parse(s):
+        rss = [r.split('-') for r in s.split(',')];
+
+        # check choices
+        for rs in rss:
+            for r in rs:
+                if not r in ncbi_ranks + ncbi_abbr.keys():
+                    logging.error("rank needs to be one of: " + str(ncbi_ranks) + " or " + str(ncbi_abbr.keys()))
+                    sys.exit()
+
+        # resolve abbreviations
+        rss = [[ncbi_abbr[r] if len(r) == 1 else r for r in rs] for rs in rss]
+
+        # expand ranges
+        def rank_range_expand(r):
+            if len(r) == 1:
+                return r
+            elif len(r) == 2:
+                f=ncbi_ranks[0:8].index(r[0])
+                t=ncbi_ranks[0:8].index(r[1])
+                if f < t:
+                    return ncbi_ranks[f:t+1]
+                elif f > t:
+                    return list(reversed(ncbi_ranks[t:f+1]))
+            else:
+                logging.error("rank range can only have to arguments")
+                sys.exit()
+
+        return [r for rs in rss for r in rank_range_expand(rs)]
+
+    ## parse args
+    parser = argparse.ArgumentParser(
+        description='Get lineages for taxids/taxnames. Reads last column in multi-column input.')
+    parser.add_argument('-t', '--taxids', nargs='?', help="NCBI taxonomy ids (or names) [<stdin>]",
+                        type=argparse.FileType('r'), default=sys.stdin)
+    parser.add_argument('-r', '--ranks', metavar='rank', nargs=1, help="output rank(s), supported: -r list [%(default)s]",
+                        default='genus,species')
+    parser.add_argument('-n', '--use-names', type=int, choices=range(0,3), default=0, help="0:taxids, 1:names, or 2:names+taxids in output [%(default)s]")
+    parser.add_argument('--na', metavar='', nargs=2, help="missing data values for id and name [NA unclassified]", default=["NA", "unclassified"])
+    parser.add_argument('-H', '--no-header', action='store_true', help="omit output header line")
+    parser.add_argument('-c', '--comment', metavar='', help="pass-through lines starting with this character [%(default)s]", default="#")
+    parser.add_argument('--ncbi-update', action='store_true', help="update the local NCBI Taxonomy database and exit")
+    parser.add_argument('-q', '--quiet', action='store_true', help="omit log messages")
+    parser.add_argument('--version', action='version', version='%(prog)s-'+__version__)
+    opt=parser.parse_args()
+
+    ## logging
+    logging.basicConfig(level=logging.INFO if not opt.quiet else logging.WARN,
+                        format='[%(asctime)s] %(message)s', datefmt='%m/%d/%Y %H:%M:%S')
+    logging.StreamHandler.setFormatter
+
+    opt.ranks = ranks_parse(opt.ranks[0])
+
+    return(opt)
+
+
+def main():
+
+    opt=opts()
+
+    if opt.ncbi_update:
+        ncbi.update_taxonomy_database()
+        sys.exit()
+
+    logging.info("Reading " + opt.taxids.name)
+
+    if not opt.no_header:
+        logging.info("Treating first line in input as header (toggle with -H)")
+        print opt.taxids.readline().rstrip() + "\t",
+        if opt.use_names == 0:
+            print "\t".join([r + "_id" for r in opt.ranks])
+        elif opt.use_names == 1:
+            print "\t".join([r + "_name" for r in opt.ranks])
+        elif opt.use_names == 2:
+            print "\t".join(zipl([r + "_name" for r in opt.ranks], [r + "_id" for r in opt.ranks]))
+
+    for line in opt.taxids: # loop taxids
+
+        if opt.comment and line[0] == opt.comment: # pass-through comment lines
+            print line
+            continue
+
+        line=line.rstrip("\n")
+        fields=line.split("\t")
+        tid=fields[-1]
+        line=line + "\t"
+        print line,
+        #tid=tid.rstrip()
+
+        # missing taxid, or taxid 0 (undef) or 1 (root)
+        if not tid or tid == "0" or tid == "1": # output a bunch of NAs
+            if not opt.use_names:
+                tids = [opt.na[0]] * len(opt.ranks)
+            elif opt.use_names == 1:
+                tids = [opt.na[1]] * len(opt.ranks)
+            elif opt.use_names == 2:
+                tids = [opt.na[0]] * len(opt.ranks)
+                tnames = [opt.na[1]] * len(opt.ranks)
+                tids = zipl(tnames, tids)
+            print "\t".join(str(x) for x in tids)
+            continue
+
+        if not tid.isdigit(): # non-numeric value
+            trans = ncbi.get_name_translator([tid])
+            if tid in trans: # could be translated
+                tid = str(trans[tid][0])
+            else:
+                logging.warn("NOTE: couldn't translate '"+tid+"' into a valid taxid - treating as NA")
+                if not opt.use_names:
+                    tids = [opt.na[0]] * len(opt.ranks)
+                elif opt.use_names == 1:
+                    tids = [opt.na[1]] * len(opt.ranks)
+                elif opt.use_names == 2:
+                    tids = [opt.na[0]] * len(opt.ranks)
+                    tnames = [opt.na[1]] * len(opt.ranks)
+                    tids = zipl(tnames, tids)
+                print "\t".join(str(x) for x in tids)
+                continue
+
+        tid=int(tid) # tid needs to be int for get lineage!
+        with warnings.catch_warnings(record=True) as w:
+            lineage = ncbi.get_lineage(tid)
+            if w:
+                logging.warn("NOTE: deprecated %s" %(w[0].message))
+
+        lineage_ranked = ncbi.get_rank(lineage)
+        #print lineage
+        ranks = dict(zip(opt.ranks, [None] * len(opt.ranks)))
+        for lid, rank in lineage_ranked.items():
+            if rank in opt.ranks:
+                ranks[rank] = lid
+
+        tids=[ranks[rank] for rank in opt.ranks]
+        if not opt.use_names:
+            if opt.na[0] != None: # replace None with custom NA
+                tids = [x if x else opt.na[0] for x in tids]
+        elif opt.use_names == 1:
+            tnames = ids2names(tids)
+            if opt.na[1] != None: # replace None with custom NA
+                tids = [x if x else opt.na[1] for x in tnames]
+        elif opt.use_names == 2:
+            tnames = ids2names(tids)
+            if opt.na[1] != None: # replace None with custom NA
+                tnames = [x if x else opt.na[1] for x in tnames]
+            if opt.na[0] != None: # replace None with custom NA
+                tids = [x if x else opt.na[0] for x in tids]
+            tids = zipl(tnames, tids)
+
+        print "\t".join(str(x) for x in tids)
+
+
+def zipl(x, y):
+    return(val for pair in zip(x, y) for val in pair)
+
+def ids2names(ids):
+    return(x[0] for x in (ncbi.translate_to_names([t]) if t else [t] for t in ids))
+
+if __name__ == '__main__':
+    main()
