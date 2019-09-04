@@ -1,11 +1,4 @@
 {
-    "title": "thackl/cr-genomes: cr-genomes-v1.3", 
     "description": "<p>Supplementary code and data for genomes of C.roenbergensis: E4-10P, BVI, Cflag and RCC970-E3</p>", 
     "license": "MIT", 
-    "creators": [
-        {
-            "affiliation": "Massachusetts Institute of Technology", 
-            "name": "Thomas Hackl"
-        }
-    ]
 }
