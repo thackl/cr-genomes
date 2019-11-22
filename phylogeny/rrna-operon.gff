@@ -1,0 +1,4 @@
+CrBV-c0e_11:530335-537940	barrnap:0.9	rRNA	1	4607	1.3e-15	-	.	Name=rRNA_operon;product=ribosomal RNA operon (18S-5.8S-28S)
+CrCf-c0e_3:403815-411421	barrnap:0.9	rRNA	1	4607	1.3e-15	-	.	Name=rRNA_operon;product=ribosomal RNA operon (18S-5.8S-28S)
+CrEa-c0e_9:393136-400747	barrnap:0.9	rRNA	1	4607	1.3e-15	-	.	Name=rRNA_operon;product=ribosomal RNA operon (18S-5.8S-28S)
+CrRC-c1e_66:0-7601	barrnap:0.9	rRNA	1	4607	1.3e-15	-	.	Name=rRNA_operon;product=5S ribosomal RNA operon (18S-5.8S-28S)
